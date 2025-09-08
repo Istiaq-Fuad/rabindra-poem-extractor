@@ -1,0 +1,10 @@
+[project]
+name = "rabindra-scrape"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "parsel>=1.10.0",
+    "requests>=2.32.5",
+]
