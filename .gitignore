@@ -19,3 +19,6 @@ output/
 
 # demo file
 demo.txt
+
+# notebooks
+*.ipynb

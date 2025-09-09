@@ -6,6 +6,7 @@ import os
 import re
 from urllib.parse import urljoin
 from typing import List, Dict, Any
+import unicodedata
 
 
 class RabindraPoetryParser:
@@ -25,7 +26,11 @@ class RabindraPoetryParser:
             if tag is None:  # text node
                 text_val = node.get()
                 if text_val:
-                    pieces.append(text_val.replace("\xa0", " ").replace("&nbsp;", " "))
+                    pieces.append(
+                        text_val.replace("\xa0", " ")
+                        .replace("&nbsp;", " ")
+                        .replace("\n", " ")
+                    )
 
             elif tag.lower() == "font":
                 inner_text = "".join(node.xpath(".//text()").getall())
@@ -44,6 +49,8 @@ class RabindraPoetryParser:
         line = "".join(pieces)
         line = re.sub(r"\n+", "\n", line)
         line = line.rstrip()
+        line = unicodedata.normalize("NFC", line)
+        line = re.sub(r"([।?!,—])", r" \1 ", line)
 
         return line + "<line>"
 
@@ -116,14 +123,20 @@ class RabindraPoetryParser:
                 if current_line_parts:
                     line = "".join(current_line_parts).rstrip()
                     if line:  # Only add non-empty lines
-                        lines.append(line + "<line>")
+                        # Apply processing to the line before adding to array
+                        processed_line = unicodedata.normalize("NFC", line)
+                        processed_line = re.sub(r"([।?!,—])", r" \1 ", processed_line)
+                        lines.append(processed_line + "<line>")
                     current_line_parts = []
 
         # Add any remaining content as the last line
         if current_line_parts:
             line = "".join(current_line_parts).rstrip()
             if line:
-                lines.append(line + "<line>")
+                # Apply processing to the line before adding to array
+                processed_line = unicodedata.normalize("NFC", line)
+                processed_line = re.sub(r"([।?!,—])", r" \1 ", processed_line)
+                lines.append(processed_line + "<line>")
 
         return "\n".join(lines)
 
@@ -282,15 +295,41 @@ class RabindraPoetryaScraper:
         return poems
 
     def scrape_all_collections(
-        self, start_subcatid: int = 1, end_subcatid: int = 53
-    ) -> List[Dict[str, Any]]:
-        all_poems = []
+        self,
+        start_subcatid: int = 1,
+        end_subcatid: int = 53,
+        json_filename: str = "output/rabindra_poems.json",
+        txt_filename: str = "output/rabindra_poems.txt",
+    ) -> int:
+        """
+        Scrape all collections and write poems to files one by one.
+        Returns the total number of poems scraped.
+        """
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(json_filename), exist_ok=True)
+        os.makedirs(os.path.dirname(txt_filename), exist_ok=True)
+
+        total_poems = 0
+
+        # Initialize JSON file with opening bracket
+        with open(json_filename, "w", encoding="utf-8") as json_file:
+            json_file.write("[\n")
+
+        # Initialize text file (empty)
+        with open(txt_filename, "w", encoding="utf-8") as txt_file:
+            pass
 
         for subcatid in range(start_subcatid, end_subcatid + 1):
             try:
                 print(f"\n--- Processing Collection {subcatid} ---")
                 collection_poems = self.scrape_collection(subcatid)
-                all_poems.extend(collection_poems)
+
+                # Write each poem immediately to both files
+                for i, poem in enumerate(collection_poems):
+                    self._append_poem_to_files(
+                        poem, json_filename, txt_filename, total_poems > 0
+                    )
+                    total_poems += 1
 
                 print(
                     f"Scraped {len(collection_poems)} poems from collection {subcatid}"
@@ -300,7 +339,12 @@ class RabindraPoetryaScraper:
                 print(f"Error processing collection {subcatid}: {e}")
                 continue
 
-        return all_poems
+        # Close JSON array
+        with open(json_filename, "a", encoding="utf-8") as json_file:
+            json_file.write("\n]")
+
+        print(f"\nTotal poems scraped: {total_poems}")
+        return total_poems
 
     def save_poems(
         self, poems: List[Dict[str, Any]], filename: str = "output/rabindra_poems.json"
@@ -330,7 +374,32 @@ class RabindraPoetryaScraper:
                 content = poem["content"]
                 content = re.sub(r"(\n<line>)+\n", "\n<stanza>\n", content)
                 f.write(content)
-                f.write("\n<end_poem>\n")
+                f.write("\n<stanza>\n")
+                f.write("<end_poem>\n")
                 # f.write("\n" + "=" * 80 + "\n\n")
 
         print(f"Saved {len(poems)} poems to {filename}")
+
+    def _append_poem_to_files(
+        self,
+        poem: Dict[str, Any],
+        json_filename: str,
+        txt_filename: str,
+        need_comma: bool,
+    ):
+        """Helper method to append a single poem to both JSON and text files"""
+        # Append to JSON file
+        with open(json_filename, "a", encoding="utf-8") as json_file:
+            if need_comma:
+                json_file.write(",\n")
+            json.dump(poem, json_file, ensure_ascii=False, indent=2)
+
+        # Append to text file
+        with open(txt_filename, "a", encoding="utf-8") as txt_file:
+            txt_file.write("<start_poem>\n")
+            # Replace consecutive <line> patterns with <stanza>
+            content = poem["content"]
+            content = re.sub(r"(\n<line>)+\n", "\n<stanza>\n", content)
+            txt_file.write(content)
+            txt_file.write("\n<stanza>\n")
+            txt_file.write("<end_poem>\n")
