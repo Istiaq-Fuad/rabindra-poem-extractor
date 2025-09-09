@@ -3,6 +3,7 @@ import parsel
 import json
 import time
 import os
+import re
 from urllib.parse import urljoin
 from typing import List, Dict, Any
 
@@ -33,15 +34,18 @@ class RabindraPoetryParser:
                     pieces.append(" " * nbsp_count)
 
             elif tag.lower() == "br":
-                pieces.append("\n")
+                pieces.append("<line>\n")
 
             else:
                 sub_text = RabindraPoetryParser.extract_text_with_spacing(node)
                 if sub_text:
                     pieces.append(sub_text)
 
-        # Join as one continuous string (no accidental newlines)
-        return "".join(pieces)
+        line = "".join(pieces)
+        line = re.sub(r"\n+", "\n", line)
+        line = line.rstrip()
+
+        return line + "<line>"
 
     @staticmethod
     def parse_poem_content(selector: parsel.Selector) -> str:
@@ -68,11 +72,59 @@ class RabindraPoetryParser:
 
             return "\n".join(lines)
 
-        raw_text = RabindraPoetryParser.extract_text_with_spacing(kobita_div)
-        pieces = raw_text.split("\n")
-        lines = [
-            line.rstrip() for line in pieces if line.strip() or line.startswith(" ")
-        ]
+        # Handle br tag scenario - split content by br tags
+        return RabindraPoetryParser.parse_br_content(kobita_div)
+
+    @staticmethod
+    def parse_br_content(kobita_div: parsel.Selector) -> str:
+        """Parse poem content that uses br tags as line separators"""
+        lines = []
+        current_line_parts = []
+
+        # Get all child nodes (text and elements)
+        for node in kobita_div.xpath("./node()"):
+            tag = node.root.tag if hasattr(node.root, "tag") else None
+
+            if tag is None:  # text node
+                text_val = node.get()
+                if text_val:
+                    # Strip native newlines but preserve other spacing
+                    clean_text = text_val.replace("\n", "").replace("\r", "")
+                    clean_text = clean_text.replace("\xa0", " ").replace("&nbsp;", " ")
+                    if clean_text:  # Only add if there's actual content after cleaning
+                        current_line_parts.append(clean_text)
+
+            elif tag.lower() == "font":
+                # Handle font tags that might contain nbsp - preserve spacing exactly
+                inner_text = "".join(node.xpath(".//text()").getall())
+                # Strip native newlines from font content too
+                inner_text = inner_text.replace("\n", "").replace("\r", "")
+                nbsp_count = inner_text.count("\xa0") + inner_text.count("&nbsp;")
+                if nbsp_count > 0:
+                    current_line_parts.append(" " * nbsp_count)
+                else:
+                    # Regular text in font tag
+                    if inner_text:
+                        clean_text = inner_text.replace("\xa0", " ").replace(
+                            "&nbsp;", " "
+                        )
+                        if clean_text:
+                            current_line_parts.append(clean_text)
+
+            elif tag.lower() == "br":
+                # End current line and start new one - only add line break here
+                if current_line_parts:
+                    line = "".join(current_line_parts).rstrip()
+                    if line:  # Only add non-empty lines
+                        lines.append(line + "<line>")
+                    current_line_parts = []
+
+        # Add any remaining content as the last line
+        if current_line_parts:
+            line = "".join(current_line_parts).rstrip()
+            if line:
+                lines.append(line + "<line>")
+
         return "\n".join(lines)
 
 
@@ -86,6 +138,32 @@ class RabindraPoetryaScraper:
             }
         )
         self.parser = RabindraPoetryParser()
+
+    def process_stanzas(self, content: str) -> str:
+        """
+        Process poem content to insert stanza markers where there are consecutive newlines.
+        Replaces multiple consecutive newlines with stanza markers.
+        """
+        import re
+
+        # Find sequences of 2 or more consecutive newlines
+        # Replace them with stanza markers
+        stanza_count = 1
+
+        def replace_with_stanza(match):
+            nonlocal stanza_count
+            newlines = match.group(0)
+            # Keep first and last newline, insert stanza marker in between
+            if len(newlines) >= 2:
+                result = newlines[0] + f"<stanza{stanza_count}>" + newlines[-1]
+                stanza_count += 1
+                return result
+            return newlines
+
+        # Pattern to match 2 or more consecutive newlines
+        processed_content = re.sub(r"\n{2,}", replace_with_stanza, content)
+
+        return processed_content
 
     def get_page(self, url: str) -> parsel.Selector:
         try:
@@ -149,37 +227,35 @@ class RabindraPoetryaScraper:
         while current_url:
             print(f"  Scraping page {page_count}: {current_url}")
 
-            # Get current page
             selector = self.get_page(current_url)
             if not selector:
                 print(f"  Warning: Could not fetch page {page_count}")
                 break
 
-            # Parse content from current page
             page_content = self.parser.parse_poem_content(selector)
             if page_content:
                 all_content.append(page_content)
 
-            # Find next page URL
             next_url = self.get_next_page_url(selector)
 
             if next_url and next_url != current_url:
                 current_url = next_url
                 page_count += 1
-                # Small delay between pages
                 time.sleep(0.5)
             else:
-                # No more pages
                 break
 
         print(f"  Completed scraping {page_count} page(s)")
 
         # Combine all pages with page breaks
         combined_content = (
-            "\n\n--- পাতা বিভাজক ---\n\n".join(all_content)
+            "\n".join(all_content)
             if len(all_content) > 1
             else (all_content[0] if all_content else "")
         )
+
+        # Process the combined content to add stanza markers
+        # processed_content = self.process_stanzas(combined_content)
 
         return {
             "title": poem_info["title"],
@@ -245,11 +321,16 @@ class RabindraPoetryaScraper:
 
         with open(filename, "w", encoding="utf-8") as f:
             for poem in poems:
-                f.write(f"Title: {poem['title']}\n")
-                f.write(f"Collection ID: {poem['collection_id']}\n")
-                f.write(f"URL: {poem['url']}\n")
-                f.write("-" * 50 + "\n")
-                f.write(poem["content"])
-                f.write("\n" + "=" * 80 + "\n\n")
+                # f.write(f"Title: {poem['title']}\n")
+                # f.write(f"Collection ID: {poem['collection_id']}\n")
+                # f.write(f"URL: {poem['url']}\n")
+                # f.write("-" * 50 + "\n")
+                f.write("<start_poem>\n")
+                # Replace consecutive <line> patterns with <stanza>
+                content = poem["content"]
+                content = re.sub(r"(\n<line>)+\n", "\n<stanza>\n", content)
+                f.write(content)
+                f.write("\n<end_poem>\n")
+                # f.write("\n" + "=" * 80 + "\n\n")
 
         print(f"Saved {len(poems)} poems to {filename}")

@@ -16,3 +16,6 @@ test.json
 
 # output files
 output/
+
+# demo file
+demo.txt
