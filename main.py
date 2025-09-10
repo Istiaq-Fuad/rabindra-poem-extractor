@@ -15,7 +15,7 @@ def main():
 
     # Test with first collection
     print("Testing with collection 1...")
-    test_poems = scraper.scrape_collection(1)
+    test_poems = scraper.scrape_collection(53)
     if test_poems:
         print(f"Test successful! Found {len(test_poems)} poems")
         scraper.save_poems(test_poems, "output/rabindra_poems_test.json")

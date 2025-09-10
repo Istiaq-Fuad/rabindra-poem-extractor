@@ -13,6 +13,30 @@ class RabindraPoetryParser:
     """Parser for handling poem content with proper formatting"""
 
     @staticmethod
+    def remove_bengali_digits(text: str) -> str:
+        """Remove Bengali digits from text"""
+        bengali_digits = "০১২৩৪৫৬৭৮৯"
+        english_digits = "0123456789"
+
+        # Create translation table to remove Bengali and English digits
+        translation_table = str.maketrans("", "", bengali_digits + english_digits)
+        return text.translate(translation_table)
+
+    @staticmethod
+    def process_line(line: str) -> str:
+        """Apply common processing to a line: remove digits, normalize, add punctuation spacing"""
+        # Remove Bengali and English digits
+        line = RabindraPoetryParser.remove_bengali_digits(line)
+        # Check if line is empty after digit removal
+        if not line.strip():
+            return None
+        # Unicode normalization
+        line = unicodedata.normalize("NFC", line)
+        # Add spacing around punctuation
+        line = re.sub(r"([।?!,—])", r" \1 ", line)
+        return line
+
+    @staticmethod
     def extract_text_with_spacing(element: parsel.Selector) -> str:
         """
         Extract text from an element while preserving spaces represented
@@ -49,38 +73,181 @@ class RabindraPoetryParser:
         line = "".join(pieces)
         line = re.sub(r"\n+", "\n", line)
         line = line.rstrip()
-        line = unicodedata.normalize("NFC", line)
-        line = re.sub(r"([।?!,—])", r" \1 ", line)
+        processed_line = RabindraPoetryParser.process_line(line)
 
-        return line + "<line>"
+        # If line becomes empty after processing, return None
+        if processed_line is None:
+            return None
+
+        return processed_line + "<line>"
 
     @staticmethod
     def parse_poem_content(selector: parsel.Selector) -> str:
-        """Parse poem content handling both scenarios (p tags vs br tags)"""
+        """Parse poem content handling both scenarios (p tags, br tags, or combination)"""
         kobita_divs = selector.xpath('//div[contains(@id, "kobita")]')
         if not kobita_divs:
             return ""
         kobita_div = kobita_divs[0]
 
         p_tags = kobita_div.xpath(".//p")
-        if p_tags:
+        br_tags = kobita_div.xpath(".//br")
+
+        # Check if we have a combination of p tags and br tags
+        if p_tags and br_tags:
+            return RabindraPoetryParser.parse_combined_content(kobita_div)
+        elif p_tags:
+            # Pure p tag scenario
             lines = []
             for p_tag in p_tags:
                 line_content = RabindraPoetryParser.extract_text_with_spacing(p_tag)
 
                 if line_content:
                     clean_line = line_content.replace("\n", "").rstrip()
-                    # if clean_line.strip() or clean_line.startswith(" "):
-                    #     lines.append(clean_line)
                     if clean_line.strip():
                         lines.append(clean_line)
                     elif clean_line.strip() == "":
                         lines.append("")
 
             return "\n".join(lines)
+        else:
+            # Handle br tag scenario - split content by br tags
+            return RabindraPoetryParser.parse_br_content(kobita_div)
 
-        # Handle br tag scenario - split content by br tags
-        return RabindraPoetryParser.parse_br_content(kobita_div)
+    @staticmethod
+    def parse_combined_content(kobita_div: parsel.Selector) -> str:
+        """Parse poem content that contains both p tags and br tags"""
+        lines = []
+        current_line_parts = []
+
+        # Process all direct children of the kobita div
+        for child in kobita_div.xpath("./node()"):
+            tag = child.root.tag if hasattr(child.root, "tag") else None
+
+            if tag is None:  # text node
+                text_val = child.get()
+                if text_val:
+                    clean_text = text_val.replace("\n", "").replace("\r", "")
+                    clean_text = clean_text.replace("\xa0", " ").replace("&nbsp;", " ")
+                    if clean_text:  # Keep all text including whitespace
+                        current_line_parts.append(clean_text)
+
+            elif tag.lower() == "p":
+                # First, finalize any pending line parts from before this p tag
+                if current_line_parts:
+                    line = "".join(current_line_parts).rstrip()
+                    if line.strip():
+                        processed_line = RabindraPoetryParser.process_line(line)
+                        if processed_line is not None:
+                            lines.append(processed_line + "<line>")
+                    current_line_parts = []
+
+                # Check if this is an empty p tag (stanza break) or contains content
+                p_text = "".join(child.xpath(".//text()").getall()).strip()
+                p_text = p_text.replace("\xa0", "").replace("&nbsp;", "")
+
+                if not p_text:  # Empty p tag - indicates stanza break
+                    # Add stanza break - use a placeholder that will be recognized
+                    lines.append("<stanza_break>")
+                else:
+                    # P tag with content - may contain br tags for line breaks
+                    # Need to parse the content within the p tag for br tags
+                    current_p_line = []
+
+                    # Process all nodes within the p tag
+                    for p_node in child.xpath("./node()"):
+                        p_tag = p_node.root.tag if hasattr(p_node.root, "tag") else None
+
+                        if p_tag is None:  # text node within p
+                            text_val = p_node.get()
+                            if text_val:
+                                clean_text = text_val.replace("\n", "").replace(
+                                    "\r", ""
+                                )
+                                clean_text = clean_text.replace("\xa0", " ").replace(
+                                    "&nbsp;", " "
+                                )
+                                if clean_text:
+                                    current_p_line.append(clean_text)
+
+                        elif p_tag.lower() == "font":
+                            # Handle font tags within p
+                            inner_text = "".join(p_node.xpath(".//text()").getall())
+                            inner_text = inner_text.replace("\n", "").replace("\r", "")
+                            nbsp_count = inner_text.count("\xa0") + inner_text.count(
+                                "&nbsp;"
+                            )
+                            if nbsp_count > 0:
+                                current_p_line.append(" " * nbsp_count)
+                            elif inner_text.strip():
+                                clean_text = inner_text.replace("\xa0", " ").replace(
+                                    "&nbsp;", " "
+                                )
+                                if clean_text.strip():
+                                    current_p_line.append(clean_text)
+
+                        elif p_tag.lower() == "br":
+                            # BR within p tag - finalize current line
+                            if current_p_line:
+                                line = "".join(current_p_line).rstrip()
+                                if line.strip():
+                                    processed_line = RabindraPoetryParser.process_line(
+                                        line
+                                    )
+                                    if processed_line is not None:
+                                        lines.append(processed_line + "<line>")
+                                current_p_line = []
+
+                    # Add any remaining content in the p tag
+                    if current_p_line:
+                        line = "".join(current_p_line).rstrip()
+                        if line.strip():
+                            processed_line = RabindraPoetryParser.process_line(line)
+                            if processed_line is not None:
+                                lines.append(processed_line + "<line>")
+
+            elif tag.lower() == "br":
+                # BR tag represents line break - finalize current line
+                if current_line_parts:
+                    line = "".join(
+                        current_line_parts
+                    ).rstrip()  # Only strip right side to preserve leading spaces
+                    if (
+                        line.strip()
+                    ):  # Check if there's actual content after stripping both sides
+                        processed_line = RabindraPoetryParser.process_line(line)
+                        if processed_line is not None:
+                            lines.append(processed_line + "<line>")
+                    current_line_parts = []
+
+            elif tag.lower() == "font":
+                # Handle font tags that might contain spacing or text
+                inner_text = "".join(child.xpath(".//text()").getall())
+                inner_text = inner_text.replace("\n", "").replace("\r", "")
+                nbsp_count = inner_text.count("\xa0") + inner_text.count("&nbsp;")
+                if nbsp_count > 0:
+                    current_line_parts.append(" " * nbsp_count)
+                elif inner_text.strip():
+                    clean_text = inner_text.replace("\xa0", " ").replace("&nbsp;", " ")
+                    if clean_text.strip():
+                        current_line_parts.append(clean_text)
+
+        # Add any remaining content as the last line
+        if current_line_parts:
+            line = "".join(current_line_parts).rstrip()
+            if line.strip():
+                processed_line = RabindraPoetryParser.process_line(line)
+                if processed_line is not None:
+                    lines.append(processed_line + "<line>")
+
+        # Post-process to handle stanza breaks properly
+        final_lines = []
+        for line in lines:
+            if line == "<stanza_break>":
+                final_lines.append("<line>")  # Add <line> tag for stanza break
+            else:
+                final_lines.append(line)
+
+        return "\n".join(final_lines)
 
     @staticmethod
     def parse_br_content(kobita_div: parsel.Selector) -> str:
@@ -124,9 +291,9 @@ class RabindraPoetryParser:
                     line = "".join(current_line_parts).rstrip()
                     if line:  # Only add non-empty lines
                         # Apply processing to the line before adding to array
-                        processed_line = unicodedata.normalize("NFC", line)
-                        processed_line = re.sub(r"([।?!,—])", r" \1 ", processed_line)
-                        lines.append(processed_line + "<line>")
+                        processed_line = RabindraPoetryParser.process_line(line)
+                        if processed_line is not None:
+                            lines.append(processed_line + "<line>")
                     current_line_parts = []
 
         # Add any remaining content as the last line
@@ -134,9 +301,9 @@ class RabindraPoetryParser:
             line = "".join(current_line_parts).rstrip()
             if line:
                 # Apply processing to the line before adding to array
-                processed_line = unicodedata.normalize("NFC", line)
-                processed_line = re.sub(r"([।?!,—])", r" \1 ", processed_line)
-                lines.append(processed_line + "<line>")
+                processed_line = RabindraPoetryParser.process_line(line)
+                if processed_line is not None:
+                    lines.append(processed_line + "<line>")
 
         return "\n".join(lines)
 
